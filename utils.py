@@ -141,3 +141,24 @@ def delete_uploaded_videos():
         print(f"[Cleanup] Deleted {files_deleted} uploaded videos.")
     else:
         print("[Cleanup] No uploaded videos to delete.")
+
+def post_job_cleanup():
+    """
+    Cleans up media/, temp/, renders/, and uploaded/ folders completely to prevent disk bloat.
+    """
+    import shutil
+    dirs_to_clean = [
+        "temp",
+        "media",
+        "uploaded",
+        os.path.join("renders", "uploaded"),
+        "renders"
+    ]
+    for d in dirs_to_clean:
+        if os.path.exists(d):
+            try:
+                shutil.rmtree(d)
+                print(f"[Cleanup] Deleted directory and contents: {d}")
+            except Exception as e:
+                print(f"[Cleanup] Error deleting directory {d}: {e}")
+

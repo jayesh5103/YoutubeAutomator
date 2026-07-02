@@ -25,7 +25,7 @@ from script_writer import generate_script, generate_metadata
 from voiceover import generate_voiceover
 from video_editor import create_video, fetch_multiple_pexels_videos
 from youtube_uploader import upload_video, post_first_comment, get_channel_stats
-from utils import cleanup_temp_files, organize_render
+from utils import cleanup_temp_files, organize_render, post_job_cleanup
 from render_worker import render_batch_parallel
 from upload_renders import bulk_upload
 
@@ -102,6 +102,7 @@ def run_batch(niche_file, video_count=5):
             continue
             
     logger.info(f"Batch completed: {completed}/{video_count} successful.")
+    post_job_cleanup()
 
 def single_video_pipeline(topic, config):
     try:
@@ -346,8 +347,8 @@ def job(manual_topic=None, manual_niche=None):
             import traceback
             traceback.print_exc()
     
-    # 5. Global cleanup for any stalled patterns or leftovers
-    cleanup_temp_files()
+    # 5. Global cleanup for all temporary folders and media cache
+    post_job_cleanup()
 
 
 def run_scheduler():
