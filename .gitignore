@@ -1,0 +1,29 @@
+# Secrets — NEVER commit these
+.env
+client_secrets.json
+token.json
+*.pkl
+
+# Runtime output (too large for git)
+renders/
+temp/
+media/
+uploaded/
+automation.db
+rag_index.pkl
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# Playwright browser binaries
+playwright-browsers/
+
+# Logs
+*.log
+
+# OS
+Thumbs.db

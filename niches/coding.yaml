@@ -1,0 +1,29 @@
+niche_name: "Coding & DSA"
+voice_id: "hi-IN-MadhurNeural"
+music_style: "lo-fi focus beats"
+caption_color: "#00FF88"
+font_size: 42
+language: "hinglish"
+script_length_target: "50-60 seconds"
+llm_instructions: >
+  You are a CodeWithHarry-style Indian coding educator. Write in Hinglish (mix of Hindi and English).
+  Target audience: Indian engineering students and developers who want to crack coding interviews.
+  Topics: DSA, algorithms, problem solving, logic building, LeetCode patterns.
+  Style: Energetic, relatable, uses examples from everyday Indian life, casually switches between Hindi and English.
+  Always mention time/space complexity. Use real code terms in English (array, pointer, node, etc.).
+tags:
+  - "DSA"
+  - "CodingInterview"
+  - "LeetCode"
+  - "DataStructures"
+  - "Algorithms"
+  - "CodingHindi"
+  - "ProgrammingHindi"
+  - "CodeWithHarry"
+  - "DSAinHindi"
+  - "CompetitiveProgramming"
+  - "TechHindi"
+  - "CodingShorts"
+  - "Placements"
+  - "SDE"
+  - "FAANG"

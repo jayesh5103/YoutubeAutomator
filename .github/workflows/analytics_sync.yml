@@ -1,0 +1,46 @@
+name: Analytics Sync
+
+on:
+  schedule:
+    - cron: '0 5,11,17,23 * * *'   # offset from batch runs
+  workflow_dispatch:
+
+jobs:
+  sync_analytics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore secrets
+        run: |
+          echo "${{ secrets.ENV_FILE }}" | base64 -d > .env
+          echo "${{ secrets.GOOGLE_CLIENT_SECRETS }}" | base64 -d > client_secrets.json
+          echo "${{ secrets.GOOGLE_OAUTH_TOKEN }}" | base64 -d > token.json
+
+      - name: Restore database
+        uses: actions/cache@v4
+        with:
+          path: automation.db
+          key: automation-db-${{ github.run_number }}
+          restore-keys: automation-db-
+
+      - name: Run analytics sync
+        run: python3 analytics_sync.py --run-once
+
+      - name: Save database
+        uses: actions/cache@v4
+        with:
+          path: automation.db
+          key: automation-db-${{ github.run_number }}

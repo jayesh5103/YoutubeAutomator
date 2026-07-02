@@ -1,0 +1,66 @@
+name: Batch Video Generation
+
+on:
+  schedule:
+    - cron: '0 2,10,18 * * *'   # 2am, 10am, 6pm UTC = IST 7:30am, 3:30pm, 11:30pm
+  workflow_dispatch:              # Allow manual trigger from GitHub UI
+
+jobs:
+  generate_and_upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg fonts-noto fonts-noto-cjk fonts-indic
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: playwright install chromium --with-deps
+
+      - name: Restore secrets
+        run: |
+          echo "${{ secrets.ENV_FILE }}" | base64 -d > .env
+          echo "${{ secrets.GOOGLE_CLIENT_SECRETS }}" | base64 -d > client_secrets.json
+          echo "${{ secrets.GOOGLE_OAUTH_TOKEN }}" | base64 -d > token.json
+
+      - name: Restore database (from artifact cache)
+        uses: actions/cache@v4
+        with:
+          path: automation.db
+          key: automation-db-${{ github.run_number }}
+          restore-keys: automation-db-
+
+      - name: Run batch cycle
+        env:
+          HEADLESS_MODE: "true"
+        run: python3 main.py --now
+
+      - name: Save database (persist learning data between runs)
+        uses: actions/cache@v4
+        with:
+          path: automation.db
+          key: automation-db-${{ github.run_number }}
+
+      - name: Upload run logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-logs-${{ github.run_number }}
+          path: |
+            *.log
+          retention-days: 7

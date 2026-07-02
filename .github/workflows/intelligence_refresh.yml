@@ -1,0 +1,45 @@
+name: Intelligence Refresh (Weekly)
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'   # Every Sunday midnight UTC
+  workflow_dispatch:
+
+jobs:
+  refresh_topics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore secrets
+        run: |
+          echo "${{ secrets.ENV_FILE }}" | base64 -d > .env
+          echo "${{ secrets.GOOGLE_CLIENT_SECRETS }}" | base64 -d > client_secrets.json
+
+      - name: Restore database
+        uses: actions/cache@v4
+        with:
+          path: automation.db
+          key: automation-db-${{ github.run_number }}
+          restore-keys: automation-db-
+
+      - name: Run intelligence refresh
+        run: python3 main.py --intelligence
+
+      - name: Save database
+        uses: actions/cache@v4
+        with:
+          path: automation.db
+          key: automation-db-${{ github.run_number }}
