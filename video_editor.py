@@ -628,5 +628,256 @@ def create_storyboard_video(beats: list, output_path: str,
     return output_path, beats_with_timing
 
 
+# ── Post-Render Timeline & Editing Tools ─────────────────────────────────────
+
+def reassemble_from_timeline(pipeline_id: int, timeline_spec: list, music_track: str = None) -> str | None:
+    """
+    Re-stitches existing rendered beat clips according to timeline_spec:
+    timeline_spec: list of {"beat_index": int, "trim_start": float, "trim_end": float, "include": bool}
+    Fast MoviePy concatenation without re-invoking Manim/Playwright.
+    """
+    import database
+    import json
+    from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
+    from beat_renderer import generate_srt, burn_subtitles
+
+    pipeline = database.get_pipeline(pipeline_id)
+    if not pipeline:
+        print(f"[Timeline] Pipeline {pipeline_id} not found")
+        return None
+
+    # Fetch current beat versions
+    conn = database.sqlite3.connect(database.DB_PATH)
+    conn.row_factory = database.sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM beat_versions WHERE pipeline_id = ? AND is_current = 1 ORDER BY beat_index ASC", (pipeline_id,))
+    beat_rows = {row["beat_index"]: dict(row) for row in c.fetchall()}
+    conn.close()
+
+    if not beat_rows:
+        print(f"[Timeline] No rendered beat versions found for pipeline {pipeline_id}")
+        return None
+
+    beat_clips = []
+    beats_with_timing = []
+    current_sec = 0.0
+
+    for item in timeline_spec:
+        if not item.get("include", True):
+            continue
+
+        bidx = item.get("beat_index")
+        beat_ver = beat_rows.get(bidx)
+        if not beat_ver or not beat_ver.get("clip_path") or not os.path.exists(beat_ver["clip_path"]):
+            print(f"[Timeline] Clip missing for beat {bidx}, skipping")
+            continue
+
+        clip_path = beat_ver["clip_path"]
+        audio_path = beat_ver["audio_path"]
+        t_start = item.get("trim_start", 0.0)
+        t_end = item.get("trim_end")
+
+        try:
+            v_clip = VideoFileClip(clip_path)
+            if audio_path and os.path.exists(audio_path):
+                a_clip = AudioFileClip(audio_path)
+                v_clip = v_clip.with_audio(a_clip)
+
+            clip_dur = v_clip.duration
+            if t_end is None or t_end > clip_dur:
+                t_end = clip_dur
+
+            sub_clip = v_clip.subclipped(t_start, t_end)
+            beat_clips.append(sub_clip)
+
+            dur = t_end - t_start
+            beat_data = json.loads(beat_ver.get("beat_json", "{}"))
+            beats_with_timing.append({
+                "text": beat_data.get("text", ""),
+                "start_sec": current_sec,
+                "end_sec": current_sec + dur
+            })
+            current_sec += dur
+        except Exception as e:
+            print(f"[Timeline] Error loading clip for beat {bidx}: {e}")
+
+    if not beat_clips:
+        print("[Timeline] No clips left to assemble")
+        return None
+
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "renders")
+    os.makedirs(out_dir, exist_ok=True)
+    raw_output = os.path.join(out_dir, f"p{pipeline_id}_reassembled_raw.mp4")
+    final_output = os.path.join(out_dir, f"p{pipeline_id}_reassembled.mp4")
+
+    try:
+        stitched = concatenate_videoclips(beat_clips, method="chain")
+        stitched.write_videofile(
+            raw_output, fps=30, codec="libx264", audio_codec="aac",
+            bitrate="4000k", preset="ultrafast", logger=None
+        )
+        stitched.close()
+        for c in beat_clips:
+            try: c.close()
+            except: pass
+
+        # Mix background music if requested
+        if music_track and os.path.exists(music_track):
+            with VideoFileClip(raw_output) as raw_v:
+                mixed_audio = add_background_music(raw_v.audio, music_folder=os.path.dirname(music_track))
+                raw_v = raw_v.with_audio(mixed_audio)
+                raw_v.write_videofile(raw_output, fps=30, codec="libx264", audio_codec="aac", preset="ultrafast", logger=None)
+
+        # Burn subtitles
+        srt_content = generate_srt(beats_with_timing)
+        srt_path = os.path.join(out_dir, f"p{pipeline_id}_temp.srt")
+        with open(srt_path, "w", encoding="utf-8") as f:
+            f.write(srt_content)
+
+        burn_res = burn_subtitles(raw_output, srt_path, final_output)
+        if not burn_res:
+            import shutil
+            shutil.copy(raw_output, final_output)
+
+        try:
+            if os.path.exists(raw_output): os.remove(raw_output)
+            if os.path.exists(srt_path): os.remove(srt_path)
+        except: pass
+
+        database.record_timeline_edit(pipeline_id, "REORDER_TRIM", json.dumps(timeline_spec))
+        database.update_pipeline_status(pipeline_id, pipeline["status"], video_path=final_output)
+        database.log_pipeline_event(pipeline_id, "TIMELINE_EDIT", "INFO", f"Timeline reassembled: {len(beat_clips)} clips ({current_sec:.1f}s)")
+        return final_output
+
+    except Exception as e:
+        print(f"[Timeline] Reassembly failed: {e}")
+        return None
+
+def swap_background_music(pipeline_id: int, new_track_path: str) -> str | None:
+    """
+    Re-mixes audio of the current assembled video with a new background music track at 15% volume.
+    Visuals remain unchanged.
+    """
+    import database
+    from moviepy import VideoFileClip, AudioFileClip, CompositeAudioClip
+
+    pipeline = database.get_pipeline(pipeline_id)
+    if not pipeline or not pipeline.get("video_path") or not os.path.exists(pipeline["video_path"]):
+        print(f"[Music Swap] Invalid pipeline or video path for pipeline {pipeline_id}")
+        return None
+
+    if not os.path.exists(new_track_path):
+        print(f"[Music Swap] Music track file not found: {new_track_path}")
+        return None
+
+    input_video = pipeline["video_path"]
+    out_dir = os.path.dirname(input_video)
+    output_video = os.path.join(out_dir, f"p{pipeline_id}_music_swapped.mp4")
+
+    try:
+        with VideoFileClip(input_video) as video:
+            voice_audio = video.audio
+            bg_music = AudioFileClip(new_track_path)
+            
+            # Loop or subclip bg music to match video duration
+            if bg_music.duration < video.duration:
+                from moviepy.audio.fx.AudioLoop import AudioLoop
+                bg_music = bg_music.with_effects([AudioLoop(duration=video.duration)])
+            bg_music = bg_music.subclipped(0, video.duration).with_volume_scaled(0.15)
+
+            final_audio = CompositeAudioClip([voice_audio, bg_music])
+            video_with_new_audio = video.with_audio(final_audio)
+
+            video_with_new_audio.write_videofile(
+                output_video, fps=video.fps or 30, codec="libx264", audio_codec="aac",
+                preset="ultrafast", logger=None
+            )
+
+        database.record_timeline_edit(pipeline_id, "MUSIC_SWAP", new_track_path)
+        database.update_pipeline_status(pipeline_id, pipeline["status"], video_path=output_video)
+        database.log_pipeline_event(pipeline_id, "MUSIC_SWAP", "INFO", f"Swapped background music to {os.path.basename(new_track_path)}")
+        return output_video
+
+    except Exception as e:
+        print(f"[Music Swap] Failed: {e}")
+        return None
+
+def trim_final_video(pipeline_id: int, start_seconds: float, end_seconds: float) -> str | None:
+    """
+    Trims the assembled output video between start_seconds and end_seconds.
+    """
+    import database
+    import json
+    from moviepy import VideoFileClip
+
+    pipeline = database.get_pipeline(pipeline_id)
+    if not pipeline or not pipeline.get("video_path") or not os.path.exists(pipeline["video_path"]):
+        print(f"[Trim] Invalid pipeline or video path for pipeline {pipeline_id}")
+        return None
+
+    input_video = pipeline["video_path"]
+    out_dir = os.path.dirname(input_video)
+    output_video = os.path.join(out_dir, f"p{pipeline_id}_trimmed.mp4")
+
+    try:
+        with VideoFileClip(input_video) as video:
+            sub = video.subclipped(start_seconds, min(end_seconds, video.duration))
+            sub.write_videofile(
+                output_video, fps=video.fps or 30, codec="libx264", audio_codec="aac",
+                preset="ultrafast", logger=None
+            )
+
+        database.record_timeline_edit(pipeline_id, "TRIM_FINAL", json.dumps({"start": start_seconds, "end": end_seconds}))
+        database.update_pipeline_status(pipeline_id, pipeline["status"], video_path=output_video)
+        database.log_pipeline_event(pipeline_id, "TRIM_FINAL", "INFO", f"Trimmed video to [{start_seconds:.1f}s - {end_seconds:.1f}s]")
+        return output_video
+
+    except Exception as e:
+        print(f"[Trim] Failed: {e}")
+        return None
+
+def regenerate_captions(pipeline_id: int, edited_lines: list) -> str | None:
+    """
+    Regenerates SRT subtitles from hand-corrected caption text per beat and re-burns them onto video.
+    edited_lines: list of {"text": str, "start_sec": float, "end_sec": float}
+    """
+    import database
+    import json
+    from beat_renderer import generate_srt, burn_subtitles
+
+    pipeline = database.get_pipeline(pipeline_id)
+    if not pipeline or not pipeline.get("video_path") or not os.path.exists(pipeline["video_path"]):
+        print(f"[Captions] Invalid pipeline or video path for pipeline {pipeline_id}")
+        return None
+
+    input_video = pipeline["video_path"]
+    out_dir = os.path.dirname(input_video)
+    output_video = os.path.join(out_dir, f"p{pipeline_id}_captions_updated.mp4")
+    srt_path = os.path.join(out_dir, f"p{pipeline_id}_edited.srt")
+
+    try:
+        srt_content = generate_srt(edited_lines)
+        with open(srt_path, "w", encoding="utf-8") as f:
+            f.write(srt_content)
+
+        burn_res = burn_subtitles(input_video, srt_path, output_video)
+        if not burn_res:
+            import shutil
+            shutil.copy(input_video, output_video)
+
+        try:
+            if os.path.exists(srt_path): os.remove(srt_path)
+        except: pass
+
+        database.record_timeline_edit(pipeline_id, "CAPTION_EDIT", json.dumps(edited_lines))
+        database.update_pipeline_status(pipeline_id, pipeline["status"], video_path=output_video)
+        database.log_pipeline_event(pipeline_id, "CAPTION_EDIT", "INFO", f"Regenerated subtitles with {len(edited_lines)} lines")
+        return output_video
+
+    except Exception as e:
+        print(f"[Captions] Caption update failed: {e}")
+        return None
+
 if __name__ == "__main__":
     print("Run module from main script.")
+

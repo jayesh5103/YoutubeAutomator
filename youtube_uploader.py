@@ -75,10 +75,42 @@ def get_authenticated_service():
 
     return build('youtube', 'v3', credentials=creds)
 
-def upload_video(video_path, title, description, tags, category_id="22", privacy_status="public", schedule_time=None):
+def upload_video(video_path, title, description, tags, category_id="22", privacy_status="public", schedule_time=None, pipeline_id: int | None = None):
     """
     Uploads a video to YouTube. Supports scheduling via schedule_time (ISO string).
+    Requires explicit human approval (PipelineStatus.APPROVED) before uploading.
     """
+    from pipeline_state import PipelineStatus, transition
+    import database
+
+    # Enforcement of mandatory human approval gate
+    pipeline = None
+    if pipeline_id is not None:
+        pipeline = database.get_pipeline(pipeline_id)
+    else:
+        # Search by video path if pipeline_id wasn't passed directly
+        conn = database.sqlite3.connect(database.DB_PATH)
+        conn.row_factory = database.sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM video_pipeline WHERE video_path = ? ORDER BY id DESC LIMIT 1", (video_path,))
+        r = c.fetchone()
+        conn.close()
+        if r:
+            pipeline = dict(r)
+            pipeline_id = pipeline['id']
+
+    if pipeline:
+        if pipeline['status'] != PipelineStatus.APPROVED.value and pipeline['status'] != PipelineStatus.APPROVED:
+            err_msg = f"Refusing to upload pipeline {pipeline_id}: status is {pipeline['status']!r}, not APPROVED."
+            logger.error(f"[YouTube] ⛔ {err_msg}")
+            raise PermissionError(err_msg)
+        transition(pipeline_id, PipelineStatus.UPLOADING)
+    else:
+        # If no pipeline record exists yet (e.g. direct manual upload call), enforce approval check policy
+        err_msg = f"Refusing to upload video '{video_path}': No approved video_pipeline record found."
+        logger.error(f"[YouTube] ⛔ {err_msg}")
+        raise PermissionError(err_msg)
+
     # Sanitize title: unescape HTML entities and enforce YouTube's 100-char limit
     import html
     title = html.unescape(title or "").strip()
@@ -91,6 +123,8 @@ def upload_video(video_path, title, description, tags, category_id="22", privacy
     youtube = get_authenticated_service()
     if not youtube:
         logger.error("[YouTube] Authentication service not available.")
+        if pipeline_id:
+            transition(pipeline_id, PipelineStatus.FAILED, note="Authentication service not available")
         return False
 
     body = {
@@ -127,9 +161,21 @@ def upload_video(video_path, title, description, tags, category_id="22", privacy
 
         video_id = response.get('id')
         logger.info(f"[YouTube] ✅ Uploaded successfully! ID: {video_id} | URL: https://youtu.be/{video_id}")
+        if pipeline_id:
+            conn = database.sqlite3.connect(database.DB_PATH)
+            c = conn.cursor()
+            c.execute("UPDATE video_pipeline SET youtube_video_id = ? WHERE id = ?", (video_id, pipeline_id))
+            conn.commit()
+            conn.close()
+            transition(pipeline_id, PipelineStatus.UPLOADED)
         return video_id
     except Exception as e:
         logger.error(f"[YouTube] ❌ Upload failed: {e}")
+        if pipeline_id:
+            try:
+                transition(pipeline_id, PipelineStatus.FAILED, note=str(e))
+            except Exception:
+                pass
         # Common causes: token expired, quota exceeded, bad file path
         if 'uploadLimitExceeded' in str(e) or 'uploadlimitexceeded' in str(e).lower():
             logger.warning("[YouTube] ⚠️  Daily upload limit exceeded. No more uploads will be attempted today.")

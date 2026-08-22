@@ -161,11 +161,7 @@ def job(manual_topic=None, manual_niche=None):
     Uses Parallel Rendering for maximum throughput.
     Accepts manual_topic to bypass trend engine and run a specific topic.
     """
-    import traceback
-    logger.info("--- TRACEBACK FOR JOB() CALL ---")
-    for line in traceback.format_stack():
-        logger.info(line.strip())
-    logger.info("--------------------------------")
+
     # 0. CHECK PENDING RENDERS FIRST
     logger.info("Checking for pending renders to upload...")
     bulk_upload()
@@ -267,78 +263,14 @@ def job(manual_topic=None, manual_niche=None):
             result = _render_single_job(job_data)
             print(f"[MAIN] <----- Returned from _render_single_job for {job_data['topic']}")
             
-            if result and result.get('success') and result.get('video_path'):
-                # 4. Upload immediately
-                logger.info(f"Worker finished: {result['topic']}. Determining best upload slot...")
-                schedule_time = None
-                hour, day_of_week = None, None
-                try:
-                    from learning_engine import LearningEngine
-                    from datetime import datetime, timedelta
-                    hour, day_of_week = LearningEngine.get_best_upload_slot()
-                    now = datetime.now()
-                    days_ahead = day_of_week - now.weekday()
-                    if days_ahead < 0 or (days_ahead == 0 and now.hour >= hour):
-                        days_ahead += 7
-                    target_date = now + timedelta(days=days_ahead)
-                    target_time = target_date.replace(hour=hour, minute=0, second=0, microsecond=0)
-                    schedule_time = target_time.isoformat() + "Z"
-                    logger.info(f"[MAIN] Scheduling publish for Day {day_of_week}, Hour {hour} -> {schedule_time}")
-                except Exception as slot_err:
-                    logger.error(f"[MAIN] Failed getting upload slot: {slot_err}")
-
-                video_id = upload_video(
-                    result['video_path'],
-                    result.get('title', result['topic']),
-                    result.get('description', ''),
-                    result.get('tags', [])[:15],
-                    schedule_time=schedule_time
-                )
-                if video_id == "QUOTA_EXCEEDED":
-                    logger.warning("⚠️  Daily upload limit reached. Remaining renders will be uploaded in the next scheduled run.")
-                    quota_hit = True
-                elif video_id:
-                    log_video(video_id, result.get('title'), result['topic'], result.get('niche', 'unknown'))
-                    
-                    # Record learning engine parameters
-                    try:
-                        from topic_scorer import record_topic_selection
-                        from script_scorer import record_script_pattern
-                        from visual_scorer import save_beat_metadata
-                        from upload_optimizer import record_upload_details, record_thumbnail_metadata, analyze_thumbnail_attributes
-                        
-                        niche = result.get('niche', 'unknown')
-                        topic = result.get('topic', '')
-                        title = result.get('title', '')
-                        storyboard_beats = result.get('storyboard_beats', [])
-                        
-                        record_topic_selection(video_id, topic, niche)
-                        
-                        if storyboard_beats:
-                            record_script_pattern(
-                                video_id,
-                                result.get('hook_text', ''),
-                                result.get('hook_style', 'bold_claim'),
-                                result.get('avg_beat_duration', 0.0),
-                                result.get('beat_count', 0)
-                            )
-                            save_beat_metadata(video_id, storyboard_beats)
-                            
-                        now = datetime.now()
-                        up_hour = hour if schedule_time else now.hour
-                        up_day = day_of_week if schedule_time else now.weekday()
-                        record_upload_details(video_id, up_hour, up_day)
-                        
-                        thumb_meta = analyze_thumbnail_attributes(title, storyboard_beats)
-                        record_thumbnail_metadata(video_id, thumb_meta)
-                    except Exception as le_log_err:
-                        logger.error(f"Failed to log learning engine parameters: {le_log_err}")
-
-                    from youtube_uploader import post_first_comment
-                    post_first_comment(video_id, "Kaunsa concept confuse kiya? Comment karo! 💬 Follow for daily DSA! 🚀")
-                    from utils import archive_uploaded_video
-                    archive_uploaded_video(result['video_path'])
-                    logger.info(f"✅ Uploaded & Logged: {result['title']} [{video_id}]")
+            if result and result.get('success'):
+                pipeline_id = result.get('pipeline_id')
+                if result.get('phase') == 'script_generation':
+                    logger.info(f"✅ Script generated for '{result.get('topic')}' (Pipeline #{pipeline_id}).")
+                    logger.info(f"⏸️ Pipeline paused at SCRIPT_REVIEW — Human review & approval required in GUI.")
+                else:
+                    logger.info(f"✅ Render completed for '{result.get('topic')}' (Pipeline #{pipeline_id}).")
+                    logger.info(f"⏸️ Pipeline paused at PENDING_REVIEW — Human review & approval required in GUI before uploading.")
             else:
                 err = result.get('error') if result else "Unknown error or None returned"
                 logger.error(f"❌ Worker failed for {result.get('topic', job_data['topic'])}: {err}")

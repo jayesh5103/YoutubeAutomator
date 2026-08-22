@@ -132,7 +132,7 @@ STRICT RULES:
 def _generate_with_groq(prompt):
     """
     Uses Groq API (free tier: 14,400 requests/day).
-    Models: llama-3.3-70b-versatile → llama-3.1-8b-instant (fallback)
+    Models: groq/compound → groq/compound-mini (fallback)
     """
     from groq import Groq, RateLimitError, AuthenticationError
 
@@ -142,7 +142,7 @@ def _generate_with_groq(prompt):
         return None
 
     client = Groq(api_key=api_key)
-    models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+    models_to_try = ["groq/compound", "groq/compound-mini"]
 
     for model in models_to_try:
         try:

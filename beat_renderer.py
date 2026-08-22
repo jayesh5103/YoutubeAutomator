@@ -1953,6 +1953,89 @@ def burn_subtitles(video_path: str, srt_path: str, output_path: str) -> str | No
         return None
 
 
+def render_single_beat(pipeline_id: int, beat_index: int, beat_json: dict | str, worker_id: int = 0) -> dict | None:
+    """
+    Renders a single beat (TTS audio + animation) for a pipeline and stores/updates beat_versions in DB.
+    Allows granular single-beat re-rendering without re-rendering the whole video.
+    """
+    import database
+    from moviepy import AudioFileClip
+    from voiceover import generate_voiceover
+
+    if isinstance(beat_json, str):
+        beat_dict = json.loads(beat_json)
+        beat_str = beat_json
+    else:
+        beat_dict = beat_json
+        beat_str = json.dumps(beat_json)
+
+    text = beat_dict.get("text", "")
+    visual_action = beat_dict.get("visual_action", "text_only")
+    visual_data = beat_dict.get("visual_data", beat_dict.get("params", {}))
+
+    # Save pending beat version
+    beat_ver_id = database.save_beat_version(
+        pipeline_id=pipeline_id,
+        beat_index=beat_index,
+        beat_json=beat_str,
+        render_status="RENDERING"
+    )
+
+    beats_dir = os.path.join(RENDER_DIR, "renders", "beats")
+    os.makedirs(beats_dir, exist_ok=True)
+
+    audio_path = os.path.join(beats_dir, f"p{pipeline_id}_b{beat_index}_v{beat_ver_id}.mp3")
+    clip_path = os.path.join(beats_dir, f"p{pipeline_id}_b{beat_index}_v{beat_ver_id}.mp4")
+
+    try:
+        # 1. TTS Voiceover
+        logger.info(f"[Single Beat] Pipeline {pipeline_id} Beat {beat_index}: Generating voiceover...")
+        audio_ok = generate_voiceover(text, audio_path)
+        if not audio_ok or not os.path.exists(audio_path):
+            raise RuntimeError(f"Voiceover generation failed for beat {beat_index}")
+
+        # 2. Read exact duration
+        with AudioFileClip(audio_path) as ac:
+            dur = round(ac.duration, 3)
+
+        # 3. Render HTML animation clip
+        logger.info(f"[Single Beat] Pipeline {pipeline_id} Beat {beat_index}: Rendering animation clip ({dur:.2f}s)...")
+        rendered = render_beat(visual_action, visual_data, dur, clip_path)
+        if not rendered or not os.path.exists(clip_path):
+            raise RuntimeError(f"Beat animation render failed for beat {beat_index}")
+
+        # Update DB on success
+        conn = database.sqlite3.connect(database.DB_PATH)
+        c = conn.cursor()
+        c.execute('''
+        UPDATE beat_versions
+        SET clip_path = ?, audio_path = ?, duration_seconds = ?, render_status = 'DONE', is_current = 1
+        WHERE id = ?
+        ''', (clip_path, audio_path, dur, beat_ver_id))
+        conn.commit()
+        conn.close()
+
+        database.mark_beat_current(beat_ver_id)
+        database.log_pipeline_event(pipeline_id, "BEAT_RENDER", "INFO", f"Single beat {beat_index} rendered successfully ({dur:.2f}s)")
+
+        return {
+            "beat_ver_id": beat_ver_id,
+            "beat_index": beat_index,
+            "clip_path": clip_path,
+            "audio_path": audio_path,
+            "duration": dur
+        }
+
+    except Exception as e:
+        logger.error(f"[Single Beat] Pipeline {pipeline_id} Beat {beat_index} failed: {e}")
+        conn = database.sqlite3.connect(database.DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE beat_versions SET render_status = 'FAILED' WHERE id = ?", (beat_ver_id,))
+        conn.commit()
+        conn.close()
+        database.log_pipeline_event(pipeline_id, "BEAT_RENDER", "ERROR", f"Single beat {beat_index} failed: {str(e)}")
+        return None
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     print("Testing Playwright beat renderer...")
@@ -1963,3 +2046,4 @@ if __name__ == "__main__":
         output_path="/Users/macbook/.gemini/antigravity/brain/2544c0fe-3be4-4c45-87d0-1385d749b1f9/scratch/test_chrome_place_char.mp4"
     )
     print(f"Result: {out}")
+

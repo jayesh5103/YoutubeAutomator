@@ -31,6 +31,43 @@ MANUAL_METADATA = {
 
 def bulk_upload():
     init_db()
+
+    # 1. Process explicitly APPROVED pipelines from database first
+    try:
+        from database import get_videos_by_status
+        approved_pipelines = get_videos_by_status('APPROVED')
+        if approved_pipelines:
+            logger.info(f"Found {len(approved_pipelines)} APPROVED pipelines ready for upload.")
+            for p in approved_pipelines:
+                pid = p['id']
+                v_path = p.get('video_path')
+                p_title = p.get('title') or "Amazing Coding Facts #Shorts"
+                p_desc = p.get('description') or ""
+                p_tags = [t.strip() for t in (p.get('tags') or "").split(",") if t.strip()]
+
+                if v_path and os.path.exists(v_path):
+                    logger.info(f"Uploading APPROVED pipeline #{pid} ({v_path}) as '{p_title}'...")
+                    try:
+                        vid_id = upload_video(
+                            video_path=v_path,
+                            title=p_title,
+                            description=p_desc,
+                            tags=p_tags,
+                            pipeline_id=pid
+                        )
+                        if vid_id == "QUOTA_EXCEEDED":
+                            logger.warning("⚠️  Daily upload limit reached. Stopping uploads.")
+                            break
+                        elif vid_id:
+                            log_video(vid_id, p_title, p.get('topic', ''), p.get('niche', ''))
+                            post_first_comment(vid_id, "Kaunsa part confuse kiya? Neeche batao! 💬 Part 2 ke liye subscribe karo! 🚀")
+                            logger.info(f"✅ Successfully uploaded APPROVED pipeline #{pid} -> {vid_id}")
+                    except Exception as e:
+                        logger.error(f"❌ Error uploading APPROVED pipeline #{pid}: {e}")
+    except Exception as e:
+        logger.error(f"Failed to check approved pipelines in database: {e}")
+
+    # 2. Check renders/ directory for legacy files
     render_dir = "renders"
     if not os.path.exists(render_dir):
         print("Renders directory not found.")
@@ -41,7 +78,7 @@ def bulk_upload():
         print("No videos found in renders/")
         return
 
-    logger.info(f"Found {len(files)} videos to upload.")
+    logger.info(f"Checking {len(files)} files in renders/ directory...")
 
     for filename in files:
         video_path = os.path.join(render_dir, filename)
@@ -52,30 +89,37 @@ def bulk_upload():
             "niche": "Entertainment"
         })
 
-        logger.info(f"Uploading {filename} as '{metadata['title']}'...")
+        logger.info(f"Attempting upload for {filename} as '{metadata['title']}'...")
         
-        video_id = upload_video(
-            video_path,
-            metadata['title'],
-            f"यह वीडियो {metadata['topic']} के बारे में है। ऐसी और भी रोचक जानकारी के लिए सब्सक्राइब करें!",
-            ["hindi", "facts", "trending", metadata['topic']]
-        )
+        try:
+            video_id = upload_video(
+                video_path,
+                metadata['title'],
+                f"यह वीडियो {metadata['topic']} के बारे में है। ऐसी और भी रोचक जानकारी के लिए सब्सक्राइब करें!",
+                ["hindi", "facts", "trending", metadata['topic']]
+            )
 
-        if video_id == "QUOTA_EXCEEDED":
-            logger.warning("⚠️  Daily upload limit reached. Stopping all uploads — will retry in next scheduled run.")
-            break
-        elif video_id:
-            log_video(video_id, metadata['title'], metadata['topic'], metadata['niche'])
-            post_first_comment(video_id, "क्या आपको यह पता था? 🤔 कमेंट्स में बताएं!")
-            logger.info(f"✅ Successfully uploaded and logged: {filename} -> {video_id}")
-            
-            # Optional: Move to an 'uploaded' folder
-            uploaded_dir = os.path.join(render_dir, "uploaded")
-            if not os.path.exists(uploaded_dir):
-                os.makedirs(uploaded_dir)
-            os.rename(video_path, os.path.join(uploaded_dir, filename))
-        else:
-            logger.error(f"❌ Failed to upload {filename}")
+            if video_id == "QUOTA_EXCEEDED":
+                logger.warning("⚠️  Daily upload limit reached. Stopping all uploads — will retry in next scheduled run.")
+                break
+            elif video_id:
+                log_video(video_id, metadata['title'], metadata['topic'], metadata['niche'])
+                post_first_comment(video_id, "क्या आपको यह पता था? 🤔 कमेंट्स में बताएं!")
+                logger.info(f"✅ Successfully uploaded and logged: {filename} -> {video_id}")
+                
+                # Optional: Move to an 'uploaded' folder
+                uploaded_dir = os.path.join(render_dir, "uploaded")
+                if not os.path.exists(uploaded_dir):
+                    os.makedirs(uploaded_dir)
+                os.rename(video_path, os.path.join(uploaded_dir, filename))
+            else:
+                logger.error(f"❌ Failed to upload {filename}")
+        except PermissionError as pe:
+            logger.warning(f"⚠️  Skipping upload for {filename}: {pe}")
+            continue
+        except Exception as e:
+            logger.error(f"❌ Unexpected error uploading {filename}: {e}")
+            continue
 
     # Perform cleanup of temporary files after processing renders
     logger.info("Starting cleanup of temporary files...")

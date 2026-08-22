@@ -75,13 +75,42 @@ def _render_single_job(job: dict) -> dict:
         with open(f"niches/{niche_file}", 'r') as f:
             config = yaml.safe_load(f)
 
-        # ── STORYBOARD PIPELINE (new "real edit" approach) ────────────────────
-        # Generate beat-by-beat storyboard: each sentence gets its own
-        # precisely timed Manim animation + voice audio.
-        print(f"[Worker {worker_id}] 🎬 Generating storyboard...")
-        storyboard = generate_storyboard(topic, channel_name=channel_name)
+        import database
+        from pipeline_state import PipelineStatus, transition
 
-        if storyboard:
+        pipeline_id = job.get("pipeline_id")
+        phase = job.get("phase", "script_generation")
+
+        if not pipeline_id:
+            pipeline_id = database.create_pipeline_entry(
+                topic=topic,
+                niche=config.get("niche_name", niche_file)
+            )
+
+        # ── STORYBOARD PIPELINE (new "real edit" approach) ────────────────────
+        
+        if phase == "script_generation":
+            print(f"[Worker {worker_id}] 🎬 Generating storyboard for phase '{phase}'...")
+            storyboard = generate_storyboard(topic, channel_name=channel_name)
+            
+            if storyboard:
+                script_json_str = json.dumps(storyboard, ensure_ascii=False)
+                database.save_script_version(pipeline_id, script_json_str, edited_by='system', edit_note='Initial storyboard generation')
+                transition(pipeline_id, PipelineStatus.SCRIPT_GENERATED)
+                transition(pipeline_id, PipelineStatus.SCRIPT_REVIEW)
+                return {"success": True, "pipeline_id": pipeline_id, "topic": topic, "phase": phase}
+            else:
+                return {"success": False, "topic": topic, "error": "Failed to generate storyboard"}
+                
+        elif phase == "render_video":
+            print(f"[Worker {worker_id}] 🎬 Rendering video from approved script...")
+            p = database.get_pipeline(pipeline_id)
+            if not p or not p.get("script_json"):
+                return {"success": False, "topic": topic, "error": "No script found in database for rendering"}
+            
+            storyboard = json.loads(p["script_json"])
+            transition(pipeline_id, PipelineStatus.RENDERING)
+
             # Combined script text for metadata generation
             full_script = " ".join(b["text"] for b in storyboard)
             metadata    = generate_metadata(topic, full_script)
@@ -93,6 +122,15 @@ def _render_single_job(job: dict) -> dict:
                     "tags": ["DSA", "LeetCode", "Placement"],
                     "keywords": ["algorithm", "coding"],
                 }
+
+            tags_str = ",".join(metadata.get("tags", []) + config.get("tags", []))
+            database.update_pipeline_status(
+                pipeline_id,
+                status=PipelineStatus.RENDERING.value,
+                title=metadata["title"],
+                description=metadata.get("description", ""),
+                tags=tags_str
+            )
 
             res_val = create_storyboard_video(
                 beats=storyboard,
@@ -113,6 +151,37 @@ def _render_single_job(job: dict) -> dict:
                     final_path = organize_render(out)
                     print(f"[Worker {worker_id}] ✅ Storyboard video done: {final_path}")
                     
+                    # Store beat versions in DB
+                    for idx, beat_item in enumerate(storyboard):
+                        b_text = beat_item.get("text", "")
+                        dur_sec = 0.0
+                        if idx < len(storyboard_beats):
+                            b_timing = storyboard_beats[idx]
+                            dur_sec = b_timing.get("end_sec", 0.0) - b_timing.get("start_sec", 0.0)
+                        
+                        b_clip = os.path.join("temp", f"sb_{worker_id}_b{idx}_anim.mp4")
+                        b_audio = os.path.join("temp", f"sb_{worker_id}_b{idx}_audio.mp3")
+
+                        database.save_beat_version(
+                            pipeline_id=pipeline_id,
+                            beat_index=idx,
+                            beat_json=json.dumps(beat_item),
+                            clip_path=b_clip if os.path.exists(b_clip) else None,
+                            audio_path=b_audio if os.path.exists(b_audio) else None,
+                            duration_seconds=dur_sec,
+                            render_status='DONE'
+                        )
+
+                    # Update pipeline to RENDERED then PENDING_REVIEW
+                    database.update_pipeline_status(
+                        pipeline_id,
+                        status=PipelineStatus.RENDERED.value,
+                        video_path=final_path
+                    )
+                    transition(pipeline_id, PipelineStatus.RENDERED)
+                    transition(pipeline_id, PipelineStatus.PENDING_REVIEW)
+                    database.log_pipeline_event(pipeline_id, "RENDER_COMPLETE", "INFO", f"Video render completed and waiting for review: {final_path}")
+
                     # Compute hook style and pacing stats
                     from script_scorer import classify_hook_style
                     hook_text = storyboard_beats[0]["text"] if storyboard_beats else ""
@@ -124,6 +193,7 @@ def _render_single_job(job: dict) -> dict:
 
                     return {
                         "success": True,
+                        "pipeline_id": pipeline_id,
                         "topic": topic,
                         "video_path": final_path,
                         "title": metadata["title"],
